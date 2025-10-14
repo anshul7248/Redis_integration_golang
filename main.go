@@ -46,47 +46,63 @@ func initRedis() *redis.Client {
 	})
 	_, err := rdb.Ping(ctx).Result()
 	if err != nil {
-		log.Fatal("Failed to connect with redis %v", err)
+		log.Fatal("Failed to connect with Redis %v", err)
 	}
 	return rdb
 }
 
 func getAllUsers(c echo.Context) error {
-	var users []User
-	if err := db.Find(&users).Error; err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB ERROR"})
+	val, err := rdb.Get(ctx, "all_users").Result()
+	if err == redis.Nil {
+		var users []User
+		if err := db.Find(&users).Error; err != nil {
+			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB Error"})
+		}
+		data, _ := json.Marshal(users)
+		rdb.Set(ctx, "all_users", data, 10*time.Minute)
+
+		return c.JSON(http.StatusOK, users)
+	} else if err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Redis Error"})
 	}
-
-	// Cache the full list in Redis
-	data, _ := json.Marshal(users)
-	rdb.Set(ctx, "all_users", data, 10*time.Minute)
-
+	var users []User
+	if err := json.Unmarshal([]byte(val), &users); err != nil {
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to parse the cached data"})
+	}
 	return c.JSON(http.StatusOK, users)
 }
 
+// func getAllUsers(c echo.Context) error {
+// 	var users []User
+// 	if err := db.Find(&users).Error; err != nil {
+// 		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB Error"})
+// 	}
+// 	data, _ := json.Marshal(users)
+// 	rdb.Set(ctx, "all_users", data, 10*time.Minute)
+
+//		return c.JSON(http.StatusOK, users)
+//	}
 func createUser(c echo.Context) error {
 	u := new(User)
 	if err := c.Bind(u); err != nil {
 		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid Request"})
 	}
 	var lastUser User
+
 	if err := db.Order("id desc").First(&lastUser).Error; err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB ERROR"})
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB Error"})
 	}
 	u.ID = lastUser.ID + 1
 
-	// Insert into db
-
 	if err := db.Create(&u).Error; err != nil {
-		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB ERROR"})
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "DB Error"})
 	}
+
 	var users []User
-	if err := db.Find(&users).Error; err == nil {
+	if err := db.Find(&users).Error; err != nil {
 		data, _ := json.Marshal(users)
 		rdb.Set(ctx, "all_users", data, 10*time.Minute)
 	}
-	// Also cache individual user
-
 	data, _ := json.Marshal(u)
 	rdb.Set(ctx, fmt.Sprintf("user:%d", u.ID), data, 10*time.Minute)
 	return c.JSON(http.StatusCreated, u)
@@ -94,14 +110,14 @@ func createUser(c echo.Context) error {
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found")
+		log.Println("no .env file found")
 	}
 	db = initDB()
 	rdb = initRedis()
 	e := echo.New()
-
 	e.GET("/allUsers", getAllUsers)
 	e.POST("/user", createUser)
 
 	e.Logger.Fatal(e.Start(":8080"))
+
 }
